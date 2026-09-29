@@ -32,6 +32,7 @@ where
     pub executor_events_receiver: mpsc::Receiver<ExecutorEvent<S, Rt>>,
     pub primary_shutdown: PrimaryShutdownController,
     pub transaction_cache: TxResultWriter<S, Rt>,
+    pub transient_feed: crate::transient::TransientFeed,
 }
 
 impl<S, Rt, Da> SideEffectsTask<S, Rt, Da>
@@ -111,9 +112,12 @@ where
         checkpoint: StateCheckpoint<S>,
         batch: ReadBatch,
         info_to_store: BatchToStore,
+        boundary_changes: sov_modules_api::TxChangeSet,
     ) -> Result<()> {
         self.db.terminate_batch(info_to_store).await?;
-        self.update_api_state(checkpoint);
+        let updates = Rt::default().sequencer_transient_updates(&boundary_changes);
+        self.transient_feed
+            .apply(None, updates, || self.update_api_state(checkpoint));
 
         // Publish the batch.
         self.blob_sender
@@ -189,7 +193,11 @@ where
                 let mut oneshot_and_txs = Vec::with_capacity(txs_to_insert.len());
                 for contents in txs_to_insert {
                     // Apply all updates in a single batch
-                    checkpoint_ref.apply_tx_changes(contents.tx_changes);
+                    let updates = Rt::default().sequencer_transient_updates(&contents.tx_changes);
+                    self.transient_feed
+                        .apply(Some(contents.accepted_tx.tx_hash), updates, || {
+                            checkpoint_ref.apply_tx_changes(contents.tx_changes);
+                        });
                     oneshot_and_txs.push((contents.oneshot_sender, contents.accepted_tx));
                 }
                 // Send a notification that the checkpoint has been updated. The inner value is already concurrency safe, this just ensures that anyone
@@ -208,6 +216,7 @@ where
                 batch,
                 checkpoint,
                 forced_txs,
+                boundary_changes,
             } => {
                 let info_to_store = BatchToStore {
                     blob_id: batch.blob_id,
@@ -215,8 +224,13 @@ where
                     visible_slot_number_after_increase: batch.visible_slot_number_after_increase,
                     visible_slots_to_advance: batch.visible_slots_to_advance,
                 };
-                self.close_and_publish_current_batch(checkpoint, batch, info_to_store)
-                    .await?;
+                self.close_and_publish_current_batch(
+                    checkpoint,
+                    batch,
+                    info_to_store,
+                    boundary_changes,
+                )
+                .await?;
                 for tx in forced_txs {
                     self.transaction_cache.insert(tx).await;
                 }
@@ -225,7 +239,7 @@ where
                 visible_slot_number_after_increase,
                 visible_slots_to_advance,
                 sequence_number,
-                new_checkpoint,
+                mut new_checkpoint,
                 blob_id,
             } => {
                 self.db
@@ -236,7 +250,13 @@ where
                         blob_id,
                     )
                     .await?;
-                self.update_api_state(new_checkpoint);
+                let changes = sov_modules_api::TxChangeSet {
+                    writes: new_checkpoint.changes().changes,
+                    reads: None,
+                };
+                let updates = Rt::default().sequencer_transient_updates(&changes);
+                self.transient_feed
+                    .apply(None, updates, || self.update_api_state(new_checkpoint));
             }
             ExecutorEvent::TriggerRecovery {
                 blobs_to_flush,
@@ -264,9 +284,13 @@ where
                     .publish_proof(data, sequence_number, blob_id)
                     .await?;
             }
-            ExecutorEvent::ForceUpdateApiState(new_checkpoint) => {
+            ExecutorEvent::ForceUpdateApiState {
+                checkpoint: new_checkpoint,
+                continuous,
+            } => {
                 Self::maybe_delay_api_state_update_for_tests().await;
-                self.update_api_state(new_checkpoint);
+                self.transient_feed
+                    .replace(continuous, || self.update_api_state(new_checkpoint));
             }
             ExecutorEvent::UpdateApiLedger {
                 ledger_reader,
@@ -287,12 +311,14 @@ where
             }
             ExecutorEvent::UpdateStateForRecovery(checkpoint) => {
                 Self::maybe_delay_api_state_update_for_tests().await;
-                self.update_api_state(checkpoint);
+                self.transient_feed
+                    .replace(false, || self.update_api_state(checkpoint));
             }
             ExecutorEvent::FlushTransactionsCache {
                 next_tx_number,
                 oneshot_sender,
             } => {
+                self.transient_feed.replace(false, || {});
                 self.transaction_cache
                     .clean_and_overwrite_next_tx_number(next_tx_number)
                     .await;

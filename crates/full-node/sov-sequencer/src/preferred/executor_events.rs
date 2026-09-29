@@ -169,12 +169,14 @@ impl<S: Spec, Rt: Runtime<S>> ExecutorEventsSender<S, Rt> {
         &mut self,
         checkpoint: StateCheckpoint<S>,
         forced_txs: Vec<AcceptedTx<Confirmation<S, Rt>>>,
+        boundary_changes: TxChangeSet,
     ) {
         let batch = self.cache.terminate_batch().await;
         self.send(ExecutorEvent::CloseBatch {
             batch,
             checkpoint,
             forced_txs,
+            boundary_changes,
         })
         .await;
     }
@@ -185,10 +187,17 @@ impl<S: Spec, Rt: Runtime<S>> ExecutorEventsSender<S, Rt> {
             .await;
     }
 
-    pub(crate) async fn force_update_api_state(&mut self, checkpoint: StateCheckpoint<S>) {
+    pub(crate) async fn force_update_api_state(
+        &mut self,
+        checkpoint: StateCheckpoint<S>,
+        continuous: bool,
+    ) {
         // No cache operation needed here - this is a side effect only.
-        self.send(ExecutorEvent::ForceUpdateApiState(checkpoint))
-            .await;
+        self.send(ExecutorEvent::ForceUpdateApiState {
+            checkpoint,
+            continuous,
+        })
+        .await;
     }
 
     pub(crate) async fn update_api_ledger_from_info(&self, info: &StateUpdateInfo<S::Storage>) {
@@ -347,13 +356,17 @@ where
         batch: ReadBatch,
         checkpoint: StateCheckpoint<S>,
         forced_txs: Vec<AcceptedTx<Confirmation<S, Rt>>>,
+        boundary_changes: TxChangeSet,
     },
     /// Publish a proof blob.
     PublishProofBlob(BlobInternalId, PreferredProofDataBytes, SequenceNumber),
     /// Insert an accepted transaction into the database and send out the confirmation
     AcceptedTx(AcceptedTxEventContents<S, Rt>),
     /// Update the API state to the given checkpoint without closing the current batch etc. Used during recovery
-    ForceUpdateApiState(StateCheckpoint<S>),
+    ForceUpdateApiState {
+        checkpoint: StateCheckpoint<S>,
+        continuous: bool,
+    },
     /// Update the ledger reader and send slot notifications for API/WebSocket consistency.
     UpdateApiLedger {
         ledger_reader: DeltaReader,

@@ -151,6 +151,11 @@ pub trait Sequencer: Clone + Send + Sync + 'static {
     /// The [`DaService`] used by the node (and sequencer).
     type Da: DaService<Spec = <Self::Spec as Spec>::Da>;
 
+    /// Native transient projections, available only from a preferred sequencer.
+    fn transient_feed(&self) -> Option<crate::transient::TransientFeed> {
+        None
+    }
+
     /// Only available if the [`Sequencer`] supports events streaming.
     async fn subscribe_events(&self) -> Option<SequencerEventStream<Self::Rt>> {
         None

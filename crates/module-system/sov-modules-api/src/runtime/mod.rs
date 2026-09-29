@@ -19,6 +19,19 @@ use crate::Context;
 use crate::FullyBakedTx;
 use crate::{DispatchCall, Genesis, RuntimeEventProcessor, Spec};
 
+/// A native, noncanonical projection of a committed state write.
+///
+/// These values are never runtime events, receipts, ledger entries, or consensus state.
+/// Keys and images use a runtime-defined canonical encoding. `None` is a deletion.
+#[cfg(feature = "native")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SequencerTransientUpdate {
+    /// Canonically encoded identity of the projected object.
+    pub key: Vec<u8>,
+    /// Complete replacement image, or a deletion.
+    pub value: Option<Vec<u8>>,
+}
+
 /// Flag indicating what mode the rollup is operating in.
 #[derive(
     BorshDeserialize, BorshSerialize, Serialize, Deserialize, Debug, PartialEq, Eq, Copy, Clone,
@@ -115,6 +128,21 @@ pub trait Runtime<S: Spec>:
     fn wrap_call(
         auth_data: <Self::Auth as TransactionAuthenticator<S>>::Decodable,
     ) -> Self::Decodable;
+
+    /// Projects committed writes into complete, noncanonical replacement images/deletions.
+    ///
+    /// Invoked only by the native preferred sequencer, after accepting state changes.
+    /// The input contains final writes (including deletes), never speculative/reverted writes.
+    /// It can also contain committed batch-hook or forced-transaction writes. Implementations
+    /// must project only provable User-namespace state, filter by full storage prefix,
+    /// propagate decoding failures, and
+    /// perform no state writes. An error invalidates the feed, without rejecting the transaction.
+    fn sequencer_transient_updates(
+        &self,
+        _changes: &crate::TxChangeSet,
+    ) -> anyhow::Result<Vec<SequencerTransientUpdate>> {
+        Ok(Vec::new())
+    }
 
     /// Gets the processing delay in milliseconds for a given transaction.
     /// Returns 0 if no delay is configured.

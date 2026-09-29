@@ -205,6 +205,10 @@ where
         let synchronized_state_task = synchronized_state.start().await;
         handles.push(synchronized_state_task);
 
+        let transient_feed = crate::transient::TransientFeed::new(
+            preferred_config.transient_max_frames,
+            preferred_config.transient_max_bytes,
+        );
         let side_effects_task = SideEffectsTask {
             checkpoint_sender,
             blob_sender,
@@ -213,6 +217,7 @@ where
             api_ledger_db,
             primary_shutdown: primary_shutdown.clone(),
             transaction_cache: cached_txs.write_handle(),
+            transient_feed: transient_feed.clone(),
         }
         .spawn();
         handles.push(side_effects_task);
@@ -237,6 +242,7 @@ where
             synchronized_state_updator: synchronized_state_updator.clone(),
             tx_status_manager: tx_status_manager.clone(),
             transaction_cache: cached_txs,
+            transient_feed,
             blobs_sender_channel: Some(blobs_sender_channel),
             api_state,
             _runtime: PhantomData,

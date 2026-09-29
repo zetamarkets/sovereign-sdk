@@ -641,6 +641,25 @@ where
         let node_rollup_height =
             StateCheckpoint::new(info.storage.clone(), &rt.kernel()).rollup_height_to_access();
 
+        // Preserve transient replay only when the new base has the expected user root.
+        // With no cached root, an unchanged base can still be proven against old storage.
+        let old_storage = inner.executor.checkpoint.storage();
+        let expected_root = inner
+            .executor
+            .computed_state_root(node_rollup_height)
+            .or_else(|| {
+                (node_rollup_height == inner.executor_rebase_height)
+                    .then(|| old_storage.get_root_hash(old_storage.latest_version()))
+                    .flatten()
+            });
+        let node_root = info.storage.get_root_hash(info.slot_number);
+        let continuous = expected_root
+            .zip(node_root)
+            .is_some_and(|(expected, actual)| {
+                expected.namespace_root(ProvableNamespace::User)
+                    == actual.namespace_root(ProvableNamespace::User)
+            });
+
         inner
             .executor
             .uncommitted_changes
@@ -652,7 +671,7 @@ where
             .replace_storage(info.storage.clone(), Box::new(uncommitted_changes));
         tracing::debug!(%node_rollup_height, "Storage has been replaced");
 
-        Self::common_for_final_catchup_and_new_storage(&mut inner, info.clone()).await;
+        Self::common_for_final_catchup_and_new_storage(&mut inner, info.clone(), continuous).await;
 
         Self::check_cached_state_root_against_node(&inner, &info, node_rollup_height).await;
 
@@ -775,7 +794,7 @@ where
         // The executor is now caught up. Swap it in
         inner.executor.replace_state(*executor).await;
         inner.sequence_number_of_open_batch = data.sequence_number_of_open_batch;
-        Self::common_for_final_catchup_and_new_storage(&mut inner, info).await;
+        Self::common_for_final_catchup_and_new_storage(&mut inner, info, false).await;
 
         drop(db_event_subscription);
         drop(inner);
@@ -786,6 +805,7 @@ where
     async fn common_for_final_catchup_and_new_storage(
         inner: &mut InnerGuard<'_, S, Rt>,
         info: StateUpdateInfo<S::Storage>,
+        continuous: bool,
     ) {
         let node_sequence_number =
             get_next_sequence_number_according_to_node(&info, &mut Rt::default());
@@ -807,7 +827,7 @@ where
             .clone_with_empty_witness_dropping_temp_cache();
         inner
             .executor_events_sender
-            .force_update_api_state(checkpoint)
+            .force_update_api_state(checkpoint, continuous)
             .await;
         inner
             .executor_events_sender

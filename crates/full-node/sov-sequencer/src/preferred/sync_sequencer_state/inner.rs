@@ -345,7 +345,7 @@ where
         let mut rt = Rt::default();
         let checkpoint = StateCheckpoint::new(info.storage.clone(), &rt.kernel());
         self.executor_events_sender
-            .force_update_api_state(checkpoint)
+            .force_update_api_state(checkpoint, false)
             .await;
     }
 
@@ -1018,7 +1018,7 @@ where
     #[tracing::instrument(skip_all, level = "trace")]
     pub(crate) async fn close_current_batch(&mut self) {
         // Terminate the batch.
-        let forced_txs = self.executor.end_rollup_block().await;
+        let (forced_txs, boundary_changes) = self.executor.end_rollup_block().await;
         self.update_pi_controller_on_batch_close();
         self.batch_size_tracker = BatchSizeTracker::new(self.seq_config.max_batch_size_bytes);
         let checkpoint = self
@@ -1027,7 +1027,7 @@ where
             .clone_with_empty_witness_dropping_temp_cache();
         self.sequence_number_of_open_batch = None;
         self.executor_events_sender
-            .close_batch(checkpoint, forced_txs)
+            .close_batch(checkpoint, forced_txs, boundary_changes)
             .await;
     }
 

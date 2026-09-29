@@ -5,6 +5,7 @@ pub(crate) mod common;
 mod config;
 pub(crate) mod metrics;
 pub mod rest_api;
+pub mod transient;
 mod tx_status;
 
 pub mod preferred;
