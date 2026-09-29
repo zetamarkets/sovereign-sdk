@@ -382,7 +382,7 @@ pub(crate) async fn do_next_event<S: Spec, Rt: Runtime<S>>(
             )?;
 
             tracing::trace!("Done replaying txs");
-            let forced_txs = executor.end_rollup_block().await;
+            let (forced_txs, _) = executor.end_rollup_block().await;
             for tx in forced_txs {
                 tx_cache_writer.insert(tx).await;
             }

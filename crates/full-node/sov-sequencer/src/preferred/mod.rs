@@ -127,6 +127,7 @@ where
     nonce_buffer_input: NonceBufferInputSender<SequencerTxExecutionBackend<S, Rt>, S, Rt>,
     primary_shutdown: PrimaryShutdownController,
     transaction_cache: TransactionCache<S, Rt>,
+    transient_feed: crate::transient::TransientFeed,
     // Used to track which txs need to be ignored after the sequencer had downtime (in the sense of giving out 503s)
     tx_queue_id: Arc<AtomicU64>,
     stop_at_rollup_height: Option<RollupHeight>,
@@ -795,6 +796,10 @@ where
             .await
             .map_err(|_| SequencerNotReadyDetails::Shutdown)?
             .map(|_| ())
+    }
+
+    fn transient_feed(&self) -> Option<crate::transient::TransientFeed> {
+        Some(self.transient_feed.clone())
     }
 
     fn api_state(&self) -> ApiState<Self::Spec> {

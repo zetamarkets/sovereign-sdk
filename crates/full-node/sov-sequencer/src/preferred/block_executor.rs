@@ -6,6 +6,7 @@ use crate::preferred::cache_warm_up_executor::FullyBakedTxWithMaybeChangeSet;
 use anyhow::Context;
 use axum::http::StatusCode;
 use borsh::BorshDeserialize;
+use futures::FutureExt;
 use sov_blob_storage::PreferredProofData;
 use sov_modules_api::capabilities::{
     get_maybe_timestamp_from_sequencing_data, BlobSelector, BlobSelectorOutput, ChainState,
@@ -116,8 +117,9 @@ impl<S: Spec> RollupBlockExecutorError<S> {
     }
 }
 
-type StateRootReceiver<S> =
-    oneshot::Receiver<(RollupHeight, <<S as Spec>::Storage as Storage>::Root)>;
+type StateRootReceiver<S> = futures::future::Shared<
+    oneshot::Receiver<(RollupHeight, <<S as Spec>::Storage as Storage>::Root)>,
+>;
 
 #[derive(Clone)]
 pub struct StartBlockData<S: Spec> {
@@ -716,6 +718,18 @@ impl<S: Spec, Rt: Runtime<S>> RollupBlockExecutor<S, Rt> {
         }
     }
 
+    /// Inspect completed roots without consuming their ordered delivery to the kernel.
+    /// Roots become kernel-visible only through the existing delayed population path.
+    pub(crate) fn computed_state_root(
+        &self,
+        height: RollupHeight,
+    ) -> Option<<S::Storage as Storage>::Root> {
+        self.state_roots
+            .get(&height)
+            .cloned()
+            .or_else(|| peek_computed_state_root::<S>(&self.state_root_responses, height))
+    }
+
     /// Before starting a rollup block, we need to have stored any visible state roots that it might need in state.
     /// In the node, this is done automatically, but sometimes the sequencer can run too far ahead of the node and need to compute these roots itself.
     async fn populate_state_roots(&mut self, node_state_root: &<S::Storage as Storage>::Root) {
@@ -799,17 +813,25 @@ impl<S: Spec, Rt: Runtime<S>> RollupBlockExecutor<S, Rt> {
     #[tracing::instrument(skip_all, level = "trace")]
     #[must_use]
     /// Closes the current batch and returns confirmations for all of the non-preferred txs included in the batch.
-    pub async fn end_rollup_block(&mut self) -> Vec<AcceptedTx<Confirmation<S, Rt>>> {
+    pub async fn end_rollup_block(
+        &mut self,
+    ) -> (Vec<AcceptedTx<Confirmation<S, Rt>>>, TxChangeSet) {
         trace!("Ending rollup block");
 
         let rollup_height = self.checkpoint.rollup_height_to_access();
-        let (batch_receipts, new_checkpoint) = self
+        let (batch_receipts, mut new_checkpoint) = self
             .rollup_block_task_state
             .take()
             .expect("No in-progress rollup block, nothing to do. This is a bug, please report it")
             .shutdown()
             .await
             .expect("Error while shutting down in-progress rollup block, nothing to do. This is a bug, please report it");
+
+        // Isolate committed forced-transaction and end-hook writes. Preferred transaction
+        // writes were already published individually. Comparing final values also preserves
+        // deletions while omitting unchanged writes accumulated earlier in the block.
+        let boundary_changes =
+            committed_boundary_changes(self.checkpoint.changes(), new_checkpoint.changes());
 
         let mut forced_txs = Vec::new();
         for batch_receipt in batch_receipts {
@@ -837,7 +859,8 @@ impl<S: Spec, Rt: Runtime<S>> RollupBlockExecutor<S, Rt> {
             %rollup_height,
             "Sending state root computation request to background task");
         let (response_channel, response_receiver) = oneshot::channel();
-        self.state_root_responses.push_back(response_receiver);
+        self.state_root_responses
+            .push_back(response_receiver.shared());
         let changes = Arc::new(new_checkpoint.to_raw_state_changes());
 
         if self
@@ -866,7 +889,7 @@ impl<S: Spec, Rt: Runtime<S>> RollupBlockExecutor<S, Rt> {
         );
 
         trace!(%rollup_height, "Successfully ended rollup block");
-        forced_txs
+        (forced_txs, boundary_changes)
     }
 }
 
@@ -1082,5 +1105,92 @@ fn reject_reason_to_error(
                 "error": format!("Only designated admins are allowed to send `{:#?}` transactions through this sequencer", call_discriminant),
             }),
         },
+    }
+}
+
+fn peek_computed_state_root<S: Spec>(
+    responses: &VecDeque<StateRootReceiver<S>>,
+    height: RollupHeight,
+) -> Option<<S::Storage as Storage>::Root> {
+    responses.iter().find_map(|response| {
+        let (computed_height, root) = response.clone().now_or_never()?.ok()?;
+        (computed_height == height).then_some(root)
+    })
+}
+
+/// Retain final committed writes not already visible before closing the batch.
+fn committed_boundary_changes(before: ChangeSet, after: ChangeSet) -> TxChangeSet {
+    let before = before
+        .changes
+        .into_iter()
+        .collect::<std::collections::HashMap<_, _>>();
+    TxChangeSet {
+        writes: after
+            .changes
+            .into_iter()
+            .filter(|(key, value)| before.get(key) != Some(value))
+            .collect(),
+        reads: None,
+    }
+}
+
+#[cfg(test)]
+mod transient_boundary_tests {
+    use sov_state::codec::BcsCodec;
+    use sov_state::{Namespace, SlotKey, SlotValue, SlotValueFromCodec};
+
+    use super::*;
+
+    #[test]
+    fn forced_updates_deletes_and_hooks_preserve_preferred_images() {
+        let key = |n| (SlotKey::test_key(n), Namespace::User);
+        let value = |n: u8| Some(SlotValue::new(&n, &BcsCodec {}));
+        let before = ChangeSet::new(vec![
+            (key(1), value(1)),
+            (key(2), value(2)),
+            (key(3), value(3)),
+        ]);
+        let after = ChangeSet::new(vec![
+            (key(1), value(1)), // Preferred state already published.
+            (key(2), value(9)), // Forced transaction overwrite.
+            (key(3), None),     // Forced transaction deletion.
+            (key(4), value(4)), // New forced transaction or end-hook write.
+        ]);
+        let changes = committed_boundary_changes(before, after);
+        assert_eq!(
+            changes.writes,
+            vec![(key(2), value(9)), (key(3), None), (key(4), value(4))]
+        );
+    }
+
+    #[test]
+    fn ordinary_empty_end_hooks_do_not_produce_boundary_updates() {
+        let writes = ChangeSet::new(vec![((SlotKey::test_key(1), Namespace::User), None)]);
+        assert!(committed_boundary_changes(writes.clone(), writes)
+            .writes
+            .is_empty());
+    }
+    #[tokio::test]
+    async fn rebase_root_peek_preserves_delayed_kernel_delivery() {
+        use sov_test_utils::TestSpec;
+        let (sender, receiver) = oneshot::channel();
+        let mut responses: VecDeque<StateRootReceiver<TestSpec>> =
+            VecDeque::from([receiver.shared()]);
+        let height = RollupHeight::new(7);
+        let root = <<TestSpec as Spec>::Storage as Storage>::PRE_GENESIS_ROOT;
+        assert!(peek_computed_state_root::<TestSpec>(&responses, height).is_none());
+        sender.send((height, root)).unwrap();
+        assert_eq!(
+            peek_computed_state_root::<TestSpec>(&responses, height),
+            Some(root)
+        );
+        assert!(
+            peek_computed_state_root::<TestSpec>(&responses, height.saturating_add(1)).is_none()
+        );
+        // Rebase verification cannot drain, reorder, or advance kernel visibility.
+        assert_eq!(
+            responses.pop_front().unwrap().await.unwrap(),
+            (height, root)
+        );
     }
 }

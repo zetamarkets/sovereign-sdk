@@ -232,6 +232,12 @@ pub struct PreferredSequencerConfig<Address: Copy> {
     /// Don't deviate from the default unless you know what you're doing.
     #[serde(default = "default_events_channel_size")]
     pub events_channel_size: usize,
+    /// Maximum complete native transient frames retained for replay.
+    #[serde(default = "default_transient_max_frames")]
+    pub transient_max_frames: usize,
+    /// Maximum allocation capacity in bytes of retained transient frames.
+    #[serde(default = "default_transient_max_bytes")]
+    pub transient_max_bytes: usize,
     /// Optional. When present, Postgres will be used as a database instead of
     /// RocksDB.
     #[serde(default)]
@@ -282,6 +288,8 @@ impl<Address: Copy> Default for PreferredSequencerConfig<Address> {
         Self {
             minimum_profit_per_tx: 0,
             events_channel_size: default_events_channel_size(),
+            transient_max_frames: default_transient_max_frames(),
+            transient_max_bytes: default_transient_max_bytes(),
             postgres_config: None,
             disable_state_root_consistency_checks: false,
             ideal_lag_behind_finalized_slot: default_ideal_lag_behind_finalized_slot(),
@@ -454,4 +462,11 @@ mod tests {
             "10.0.0.5/32".parse::<ipnet::IpNet>().unwrap()
         );
     }
+}
+
+const fn default_transient_max_frames() -> usize {
+    4096
+}
+const fn default_transient_max_bytes() -> usize {
+    64 * 1024 * 1024
 }
