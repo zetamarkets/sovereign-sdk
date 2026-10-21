@@ -113,17 +113,36 @@ where
     pub(crate) async fn check_readiness_msg(
         &self,
         max_concurrent_batch_blobs: usize,
-        height_to_stop_at: Option<RollupHeight>,
         reason: &'static str,
     ) -> Result<Result<(), SequencerNotReadyDetails>, SequencerStateUpdatorError> {
         let (resp, recv) = oneshot::channel();
         self.send(Message::CheckReadiness {
             resp,
             max_concurrent_batch_blobs,
-            height_to_stop_at,
             reason,
         })
         .await?;
+
+        self.recv(recv).await
+    }
+
+    pub(crate) async fn unfinalized_batches_msg(
+        &self,
+        reason: &'static str,
+    ) -> Result<usize, SequencerStateUpdatorError> {
+        let (resp, recv) = oneshot::channel();
+        self.send(Message::UnfinalizedBatches { resp, reason })
+            .await?;
+
+        self.recv(recv).await
+    }
+
+    pub(crate) async fn begin_drain_msg(
+        &self,
+        reason: &'static str,
+    ) -> Result<RollupHeight, SequencerStateUpdatorError> {
+        let (resp, recv) = oneshot::channel();
+        self.send(Message::BeginDrain { resp, reason }).await?;
 
         self.recv(recv).await
     }

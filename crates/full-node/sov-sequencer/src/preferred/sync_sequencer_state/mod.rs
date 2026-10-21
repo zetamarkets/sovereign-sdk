@@ -69,11 +69,18 @@ pub(super) enum Message<S: Spec, Rt: Runtime<S>> {
     CheckReadiness {
         resp: oneshot::Sender<Result<(), SequencerNotReadyDetails>>,
         max_concurrent_batch_blobs: usize,
-        height_to_stop_at: Option<RollupHeight>,
         reason: &'static str,
     },
     BlobSenderStatus {
         resp: oneshot::Sender<BlobSenderStatus>,
+        reason: &'static str,
+    },
+    UnfinalizedBatches {
+        resp: oneshot::Sender<usize>,
+        reason: &'static str,
+    },
+    BeginDrain {
+        resp: oneshot::Sender<RollupHeight>,
         reason: &'static str,
     },
 
