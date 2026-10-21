@@ -15,6 +15,7 @@ use sov_modules_api::rest::HasRestApi;
 use sov_modules_api::{CodeCommitmentFor, CryptoSpec, NodeEndpoints, Spec, Zkvm};
 use sov_modules_rollup_blueprint::pluggable_traits::PluggableSpec;
 use sov_modules_rollup_blueprint::proof_sender::SovApiProofSender;
+use sov_modules_rollup_blueprint::shutdown::{ImmediateShutdown, ShutdownPolicy};
 use sov_modules_rollup_blueprint::{FullNodeBlueprint, RollupBlueprint, SequencerCreationReceipt};
 use sov_modules_stf_blueprint::Runtime as RuntimeTrait;
 use sov_rollup_full_node_interface::StateUpdateReceiver;
@@ -103,6 +104,8 @@ where
 ///
 /// The `A` parameter allows injecting additional sequencer APIs (e.g., EVM's `eth_*`
 /// methods). It defaults to [`NoAdditionalApis`], which returns empty endpoints.
+///
+/// The `P` parameter is the [`ShutdownPolicy`], built with `Default`.
 pub struct RtAgnosticBlueprint<
     S: Spec,
     R: RuntimeTrait<S>,
@@ -116,8 +119,9 @@ pub struct RtAgnosticBlueprint<
     >,
     Prover = ParallelProverFactory<S>,
     A = NoAdditionalApis,
+    P = ImmediateShutdown,
 > {
-    phantom: PhantomData<(S, R, Manager, Prover, A)>,
+    phantom: PhantomData<(S, R, Manager, Prover, A, P)>,
 }
 
 /// [`RtAgnosticBlueprint`] with the default NOMT storage manager and custom additional APIs.
@@ -136,8 +140,25 @@ pub type RtAgnosticBlueprintWithApis<S, R, A> = RtAgnosticBlueprint<
     A,
 >;
 
-impl<S: Spec, R: RuntimeTrait<S>, Manager, Prover, A> Default
-    for RtAgnosticBlueprint<S, R, Manager, Prover, A>
+/// [`RtAgnosticBlueprint`] with the default NOMT storage manager and a custom [`ShutdownPolicy`].
+pub type RtAgnosticBlueprintWithShutdownPolicy<S, R, P> = RtAgnosticBlueprint<
+    S,
+    R,
+    NomtStorageManager<
+        MockDaSpec,
+        <<S as Spec>::CryptoSpec as CryptoSpec>::Hasher,
+        NomtProverStorage<
+            DefaultStorageSpec<<<S as Spec>::CryptoSpec as CryptoSpec>::Hasher>,
+            MockHash,
+        >,
+    >,
+    ParallelProverFactory<S>,
+    NoAdditionalApis,
+    P,
+>;
+
+impl<S: Spec, R: RuntimeTrait<S>, Manager, Prover, A, P> Default
+    for RtAgnosticBlueprint<S, R, Manager, Prover, A, P>
 {
     fn default() -> Self {
         Self {
@@ -146,22 +167,23 @@ impl<S: Spec, R: RuntimeTrait<S>, Manager, Prover, A> Default
     }
 }
 
-impl<S, R, Manager, Prover, A> RollupBlueprint<Native>
-    for RtAgnosticBlueprint<S, R, Manager, Prover, A>
+impl<S, R, Manager, Prover, A, P> RollupBlueprint<Native>
+    for RtAgnosticBlueprint<S, R, Manager, Prover, A, P>
 where
     S: Spec + PluggableSpec,
     R: RuntimeTrait<S> + HasKernel<S> + HasCapabilities<S> + HasKernel<S>,
     Manager: Send + Sync + 'static,
     Prover: Send + Sync + 'static,
     A: Send + Sync + 'static,
+    P: Send + Sync + 'static,
 {
     type Spec = S;
     type Runtime = R;
 }
 
 #[async_trait]
-impl<S, R, Manager, Prover, A> FullNodeBlueprint<Native>
-    for RtAgnosticBlueprint<S, R, Manager, Prover, A>
+impl<S, R, Manager, Prover, A, P> FullNodeBlueprint<Native>
+    for RtAgnosticBlueprint<S, R, Manager, Prover, A, P>
 where
     S: Spec<Da = MockDaSpec> + PluggableSpec,
     R: RuntimeTrait<S> + HasRestApi<S> + HasCapabilities<S> + HasKernel<S> + 'static,
@@ -178,6 +200,7 @@ where
         + StorageManagerInitializer<S, StorableMockDaService>,
     Prover: ProverFactory<S>,
     A: AdditionalSequencerApis<S, R>,
+    P: ShutdownPolicy<S, StorableMockDaService> + Default + Sync + 'static,
 {
     type DaService = StorableMockDaService;
 
@@ -247,6 +270,10 @@ where
         proof_blob_sender: Arc<dyn ProofBlobSender>,
     ) -> anyhow::Result<Self::ProofSender> {
         Ok(Self::ProofSender::new(proof_blob_sender))
+    }
+
+    fn shutdown_policy(&self) -> Box<dyn ShutdownPolicy<Self::Spec, Self::DaService>> {
+        Box::new(P::default())
     }
 
     #[allow(clippy::type_complexity)]

@@ -40,6 +40,7 @@ use sov_modules_api::prelude::axum::ServiceExt;
 use sov_modules_api::ModuleExecutionConfig;
 use sov_modules_api::Spec;
 use sov_modules_api::{BlobReaderTrait, FullyBakedTx};
+use sov_modules_rollup_blueprint::shutdown::ShutdownRequest;
 pub use sov_modules_rollup_blueprint::FullNodeBlueprint;
 use sov_modules_rollup_blueprint::RollupBlueprint;
 use sov_modules_stf_blueprint::Runtime;
@@ -64,7 +65,7 @@ use sov_stf_runner::{
 };
 use testcontainers::ContainerAsync;
 use testcontainers_modules::postgres::Postgres;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio::time::Duration;
@@ -283,6 +284,7 @@ impl<R: FullNodeBlueprint<Native> + Default + 'static> RollupBuilder<R> {
             .await?;
 
         let primary_shutdown = rollup.primary_shutdown.clone();
+        let shutdown_requester = rollup.shutdown_requester();
 
         let mut other_handles = Vec::new();
         let da_service = rollup.runner.da_service();
@@ -326,6 +328,7 @@ impl<R: FullNodeBlueprint<Native> + Default + 'static> RollupBuilder<R> {
             client,
             da_service,
             primary_shutdown,
+            shutdown_requester,
             secondary_test_sequencer_client: None,
             _secondary_sequencer_state_sender: None,
             other_handles,
@@ -703,6 +706,9 @@ pub struct TestRollup<R: FullNodeBlueprint<Native>> {
     /// Allows programmatically initialize shutdown of the test-rollup.
     /// Used for checking graceful shutdown and restart.
     pub primary_shutdown: PrimaryShutdownController,
+    /// Feeds the node's shutdown policy as an OS signal would, unlike `primary_shutdown` which
+    /// bypasses it.
+    pub shutdown_requester: mpsc::Sender<ShutdownRequest>,
     /// Used for cleanup/shutdown logic.
     pub rollup_task: JoinHandle<anyhow::Result<()>>,
     /// For optional handles to background tasks.

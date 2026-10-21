@@ -11,7 +11,7 @@ pub use interface::*;
 pub use logging::initialize_logging;
 pub use rt_agnostic_blueprint::{
     AdditionalSequencerApis, NoAdditionalApis, ParallelProverFactory, ProverFactory,
-    RtAgnosticBlueprint, RtAgnosticBlueprintWithApis,
+    RtAgnosticBlueprint, RtAgnosticBlueprintWithApis, RtAgnosticBlueprintWithShutdownPolicy,
 };
 use serde::{Deserialize, Serialize};
 pub use sov_db::schema::SchemaBatch;
