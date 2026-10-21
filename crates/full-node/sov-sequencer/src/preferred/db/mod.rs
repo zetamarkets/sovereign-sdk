@@ -256,6 +256,15 @@ impl BlobsCache {
             .collect()
     }
 
+    /// Closed batches whose sequence number has not been pruned yet, i.e. is not part of the
+    /// node's finalized state.
+    pub fn nb_of_unfinalized_batches(&self) -> usize {
+        self.proofs_and_completed_batches
+            .values()
+            .filter(|blob| matches!(blob, ReadBlob::Batch(_)))
+            .count()
+    }
+
     // Ensure that the provided batch number is wihin the range of sequence numbers that might plausibly be needed for replay.
     fn sanity_check_batch_sequence_number_is_in_range(
         &self,

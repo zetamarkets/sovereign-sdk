@@ -82,9 +82,9 @@ use transaction_subscriptions::TransactionCache;
 
 use crate::common::{
     error_not_fully_synced, generic_accept_tx_error, loop_send_tx_notifications, poll_state_update,
-    pre_exec_err_to_accept_tx_err, AcceptedTx, ForcedTxBatchNotification, Sequencer,
-    SequencerEventStream, StateUpdateError, StateUpdateNotification, SubscriptionStreamError,
-    WithCachedTxHashes,
+    pre_exec_err_to_accept_tx_err, AcceptedTx, DrainError, ForcedTxBatchNotification, Sequencer,
+    SequencerControl, SequencerEventStream, StateUpdateError, StateUpdateNotification,
+    SubscriptionStreamError, WithCachedTxHashes,
 };
 use crate::metrics::{track_in_progress_batch_size, PreferredSequencerFetchBatchesToReplayMetrics};
 use crate::preferred::block_executor::{RollupBlockExecutor, RollupBlockExecutorError};
@@ -148,7 +148,6 @@ where
     transaction_cache: TransactionCache<S, Rt>,
     // Used to track which txs need to be ignored after the sequencer had downtime (in the sense of giving out 503s)
     tx_queue_id: Arc<AtomicU64>,
-    stop_at_rollup_height: Option<RollupHeight>,
     #[allow(dead_code)] // Used only for testing; unused with some feature combinations.
     test_only_state_update_notification_receiver: broadcast::Receiver<StateUpdateNotification>,
     #[cfg(feature = "test-utils")]
@@ -783,6 +782,28 @@ where
 }
 
 #[async_trait]
+impl<S, Rt, Da> SequencerControl for PreferredSequencer<S, Rt, Da>
+where
+    S: Spec,
+    Rt: Runtime<S>,
+    Da: DaService<Spec = S::Da>,
+{
+    async fn begin_drain(&self) -> Result<RollupHeight, DrainError> {
+        self.synchronized_state_updator
+            .begin_drain_msg("begin_drain")
+            .await
+            .map_err(|_| DrainError::Unavailable)
+    }
+
+    async fn unfinalized_batches(&self) -> Result<usize, DrainError> {
+        self.synchronized_state_updator
+            .unfinalized_batches_msg("unfinalized_batches")
+            .await
+            .map_err(|_| DrainError::Unavailable)
+    }
+}
+
+#[async_trait]
 impl<S, Rt, Da> Sequencer for PreferredSequencer<S, Rt, Da>
 where
     S: Spec,
@@ -815,11 +836,7 @@ where
         // We don't actually care about the `inner`, we just want to reuse the
         // same logic.
         self.synchronized_state_updator
-            .check_readiness_msg(
-                self.config.max_concurrent_batch_blobs,
-                self.stop_at_rollup_height,
-                "check_readiness",
-            )
+            .check_readiness_msg(self.config.max_concurrent_batch_blobs, "check_readiness")
             .await
             .map_err(|_| SequencerNotReadyDetails::Shutdown)?
             .map(|_| ())

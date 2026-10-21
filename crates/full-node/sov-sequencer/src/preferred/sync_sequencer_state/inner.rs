@@ -523,7 +523,6 @@ where
     pub(crate) async fn check_readiness(
         &self,
         max_concurrent_batch_blobs: usize,
-        height_to_stop_at: Option<RollupHeight>,
     ) -> Result<(), SequencerNotReadyDetails> {
         // We cannot accept transactions until the latest finalized slot number
         // is AT LEAST 1. Meaning, as long as we're stuck at genesis, we can't
@@ -543,7 +542,7 @@ where
             });
         }
 
-        if let Some(height_to_stop_at) = height_to_stop_at {
+        if let Some(height_to_stop_at) = self.stop_at_rollup_height {
             let current_height = self.current_height();
             if current_height >= height_to_stop_at {
                 return Err(SequencerNotReadyDetails::PreferredSequencerAtStopHeight {
@@ -655,7 +654,7 @@ where
             })
     }
 
-    fn current_height(&self) -> RollupHeight {
+    pub(super) fn current_height(&self) -> RollupHeight {
         self.executor.checkpoint.rollup_height_to_access()
     }
 }
