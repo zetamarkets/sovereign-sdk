@@ -1,4 +1,5 @@
 mod db_elected;
+mod drain;
 mod proofs;
 mod recovery;
 mod replica_gets_txs_from_master;
