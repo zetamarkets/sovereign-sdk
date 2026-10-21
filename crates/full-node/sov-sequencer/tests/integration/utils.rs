@@ -19,6 +19,7 @@ use sov_modules_api::{
     Amount, BlockHooks, CryptoSpec, DispatchCall, FullyBakedTx, GasUnit, Module, ModuleId,
     ModuleInfo, RawTx, StateCheckpoint, TxState,
 };
+use sov_modules_rollup_blueprint::shutdown::{ImmediateShutdown, ShutdownPolicy};
 use sov_modules_stf_blueprint::GenesisParams;
 use sov_paymaster::PaymasterPolicyInitializer;
 use sov_rollup_interface::TxHash;
@@ -37,9 +38,9 @@ use sov_test_utils::test_rollup::StoragePath;
 use sov_test_utils::test_rollup::{GenesisSource, RollupBuilder, TestRollup};
 use sov_test_utils::{
     default_test_signed_transaction, default_test_tx_details, test_signed_transaction, EncodeCall,
-    MessageGenerator, RtAgnosticBlueprint, TestPrivateKey, TestSpec, TransactionType,
-    TEST_DEFAULT_GAS_LIMIT, TEST_DEFAULT_MAX_FEE, TEST_DEFAULT_MAX_PRIORITY_FEE,
-    TEST_MAX_CONCURRENT_BATCH_BLOBS,
+    MessageGenerator, RtAgnosticBlueprint, RtAgnosticBlueprintWithShutdownPolicy, TestPrivateKey,
+    TestSpec, TransactionType, TEST_DEFAULT_GAS_LIMIT, TEST_DEFAULT_MAX_FEE,
+    TEST_DEFAULT_MAX_PRIORITY_FEE, TEST_MAX_CONCURRENT_BATCH_BLOBS,
 };
 use sov_value_setter::ValueSetter;
 
@@ -343,7 +344,46 @@ pub async fn new_test_rollup_with_pruning<RT: Runtime<TestSpec> + HasRestApi<Tes
     finalization_blocks: u32,
     pruner: PrunerConfig,
 ) -> TestRollup<RtAgnosticBlueprint<TestSpec, RT>> {
-    let builder = RollupBuilder::<RtAgnosticBlueprint<TestSpec, RT>>::new(
+    new_test_rollup_with_shutdown_policy::<RT, ImmediateShutdown>(
+        dir,
+        seq_da_address,
+        genesis_params,
+        minimum_profit_per_tx,
+        automatic_batch_production,
+        max_batch_size_bytes,
+        block_producing_config,
+        rollup_prover_config,
+        blob_processing_timeout_secs,
+        max_batch_execution_time_millis,
+        stop_at_rollup_height,
+        finalization_blocks,
+        pruner,
+    )
+    .await
+}
+
+/// Like [`new_test_rollup_with_pruning`], but with the node's [`ShutdownPolicy`] set to `P`.
+#[allow(clippy::too_many_arguments)]
+pub async fn new_test_rollup_with_shutdown_policy<RT, P>(
+    dir: Arc<tempfile::TempDir>,
+    seq_da_address: MockAddress,
+    genesis_params: GenesisParams<<RT as Runtime<TestSpec>>::GenesisConfig>,
+    minimum_profit_per_tx: u128,
+    automatic_batch_production: bool,
+    max_batch_size_bytes: usize,
+    block_producing_config: BlockProducingConfig,
+    rollup_prover_config: Option<RollupProverConfig>,
+    blob_processing_timeout_secs: u64,
+    max_batch_execution_time_millis: u64,
+    stop_at_rollup_height: Option<RollupHeight>,
+    finalization_blocks: u32,
+    pruner: PrunerConfig,
+) -> TestRollup<RtAgnosticBlueprintWithShutdownPolicy<TestSpec, RT, P>>
+where
+    RT: Runtime<TestSpec> + HasRestApi<TestSpec>,
+    P: ShutdownPolicy<TestSpec, StorableMockDaService> + Default + Sync + 'static,
+{
+    let builder = RollupBuilder::<RtAgnosticBlueprintWithShutdownPolicy<TestSpec, RT, P>>::new(
         GenesisSource::CustomParams(genesis_params),
         block_producing_config,
         finalization_blocks,
