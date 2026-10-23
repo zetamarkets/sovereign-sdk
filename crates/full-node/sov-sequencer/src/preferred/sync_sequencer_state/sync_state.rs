@@ -45,7 +45,7 @@ use sov_shutdown::BackgroundHandle;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// The minimum interval between updates for the PI controller.
 const MINIMUM_TICK_SIZE: Duration = Duration::from_millis(10);
@@ -228,11 +228,10 @@ where
             Message::CheckReadiness {
                 resp,
                 max_concurrent_batch_blobs,
-                height_to_stop_at,
                 reason,
             } => {
                 let ret = self
-                    .process_check_readiness(max_concurrent_batch_blobs, height_to_stop_at, reason)
+                    .process_check_readiness(max_concurrent_batch_blobs, reason)
                     .await;
 
                 self.send_response(resp, ret, "check_readiness").await;
@@ -244,6 +243,22 @@ where
                 };
                 self.send_response(resp, ret, "proof_blob_sender_status")
                     .await;
+            }
+            Message::UnfinalizedBatches { resp, reason } => {
+                let ret = {
+                    let inner = self.get_inner_with_timing(reason).await;
+                    // A replica mirrors the leader's batches but owns none of them.
+                    if inner.seq_role.is_replica() {
+                        0
+                    } else {
+                        inner.executor_events_sender.nb_of_unfinalized_batches()
+                    }
+                };
+                self.send_response(resp, ret, "unfinalized_batches").await;
+            }
+            Message::BeginDrain { resp, reason } => {
+                let ret = self.process_begin_drain(reason).await;
+                self.send_response(resp, ret, "begin_drain").await;
             }
             Message::AcceptTx {
                 resp,
@@ -623,13 +638,29 @@ where
     async fn process_check_readiness(
         &mut self,
         max_concurrent_batch_blobs: usize,
-        height_to_stop_at: Option<RollupHeight>,
         reason: &'static str,
     ) -> Result<(), SequencerNotReadyDetails> {
         let inner = self.get_inner_with_timing(reason).await;
-        inner
-            .check_readiness(max_concurrent_batch_blobs, height_to_stop_at)
-            .await
+        inner.check_readiness(max_concurrent_batch_blobs).await
+    }
+
+    /// Runs on the state actor, so no `AcceptTx` slips in between closing the batch and pinning
+    /// the stop height; the height must be read after the close, as that is when it advances.
+    async fn process_begin_drain(&mut self, reason: &'static str) -> RollupHeight {
+        let mut inner = self.get_inner_with_timing(reason).await;
+        // Replicas own no batches; a node already shutting down may not be able to close one.
+        if inner.seq_role.is_replica() || inner.primary_shutdown.is_triggered() {
+            return inner.current_height();
+        }
+        if inner.executor.has_in_progress_batch() {
+            inner.close_current_batch().await;
+        }
+        let height = inner.current_height();
+        if inner.stop_at_rollup_height.is_none_or(|stop| height < stop) {
+            inner.stop_at_rollup_height = Some(height);
+        }
+        info!(%height, "Sequencer drain started: rejecting transactions from now on");
+        height
     }
 
     async fn process_new_storage(&mut self, info: StateUpdateInfo<S::Storage>) {
@@ -1167,10 +1198,7 @@ where
         }
 
         inner
-            .check_readiness(
-                inner.seq_config.max_concurrent_batch_blobs,
-                inner.stop_at_rollup_height,
-            )
+            .check_readiness(inner.seq_config.max_concurrent_batch_blobs)
             .await
             .map_err(AcceptTxError::NotFullySynced)?;
 

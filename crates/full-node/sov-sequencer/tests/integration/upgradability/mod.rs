@@ -22,6 +22,8 @@ use sov_value_setter::{ValueSetter, ValueSetterConfig};
 use std::sync::Arc;
 use std::time::Duration;
 
+mod drain;
+
 generate_operator_runtime_with_kernel!(kernel_type: SoftConfirmationsKernel<'a, S>, TestRuntime <= value_setter: ValueSetter<S>);
 type TestBlueprint = RtAgnosticBlueprint<TestSpec, TestRuntime<TestSpec>>;
 
@@ -418,27 +420,7 @@ async fn create_test_rollup(
     stop_at_rollup_height: Option<RollupHeight>,
     finalization_blocks: u32,
 ) -> (TestRollup<TestBlueprint>, TestUser<TestSpec>) {
-    let reward_user = TestUser::<TestSpec>::generate(TEST_DEFAULT_USER_BALANCE);
-
-    let genesis_config =
-        HighLevelOperatorGenesisConfig::<TestSpec>::generate_with_additional_accounts(
-            2,
-            reward_user,
-        );
-
-    let admin = genesis_config.additional_accounts()[0].clone();
-    let rt_genesis_config =
-        <TestRuntime<TestSpec> as Runtime<TestSpec>>::GenesisConfig::from_minimal_config(
-            genesis_config.into(),
-            ValueSetterConfig {
-                admin: admin.address(),
-            },
-        );
-
-    let genesis_params = GenesisParams {
-        runtime: rt_genesis_config.clone(),
-    };
-
+    let (genesis_params, admin) = genesis_params_with_admin();
     let dir = Arc::new(tempfile::tempdir().unwrap());
 
     (
@@ -463,6 +445,26 @@ async fn create_test_rollup(
         .await,
         admin,
     )
+}
+
+fn genesis_params_with_admin() -> (
+    GenesisParams<<TestRuntime<TestSpec> as Runtime<TestSpec>>::GenesisConfig>,
+    TestUser<TestSpec>,
+) {
+    let reward_user = TestUser::<TestSpec>::generate(TEST_DEFAULT_USER_BALANCE);
+    let genesis_config =
+        HighLevelOperatorGenesisConfig::<TestSpec>::generate_with_additional_accounts(
+            2,
+            reward_user,
+        );
+    let admin = genesis_config.additional_accounts()[0].clone();
+    let runtime = <TestRuntime<TestSpec> as Runtime<TestSpec>>::GenesisConfig::from_minimal_config(
+        genesis_config.into(),
+        ValueSetterConfig {
+            admin: admin.address(),
+        },
+    );
+    (GenesisParams { runtime }, admin)
 }
 
 fn tx_set_value(key: &Ed25519PrivateKey, nonce: u64, value_to_set: u64) -> RawTx {

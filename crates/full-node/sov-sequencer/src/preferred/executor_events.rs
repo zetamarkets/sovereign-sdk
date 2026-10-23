@@ -221,6 +221,10 @@ impl<S: Spec, Rt: Runtime<S>> ExecutorEventsSender<S, Rt> {
         self.cache.subscribe_to_events(sender);
     }
 
+    pub(crate) fn nb_of_unfinalized_batches(&self) -> usize {
+        self.cache.nb_of_unfinalized_batches()
+    }
+
     pub(crate) async fn trigger_recovery(
         &mut self,
         next_sequence_number_according_to_node: SequenceNumber,

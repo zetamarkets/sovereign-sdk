@@ -19,7 +19,10 @@ use async_trait::async_trait;
 pub use common::ForcedTxBatchNotification;
 #[cfg(feature = "test-utils")]
 pub use common::StateUpdateNotification;
-pub use common::{react_to_state_updates, AcceptTxErrorCode, AcceptTxErrorDetails, Sequencer};
+pub use common::{
+    react_to_state_updates, AcceptTxErrorCode, AcceptTxErrorDetails, DrainError, Sequencer,
+    SequencerControl,
+};
 pub use config::{SeqConfigExtension, SequencerConfig, SequencerKindConfig, SovRateLimiterConfig};
 pub use preferred::SequencerRole;
 pub use rest_api::SequencerApis;
