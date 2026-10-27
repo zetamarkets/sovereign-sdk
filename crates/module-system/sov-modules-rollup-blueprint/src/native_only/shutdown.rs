@@ -67,7 +67,8 @@ pub struct ShutdownContext<S: Spec, Da: DaService> {
 #[async_trait]
 pub trait ShutdownPolicy<S: Spec, Da: DaService>: Send {
     /// Runs until it has triggered `ctx.primary_shutdown`. The task is cancelled once the primary
-    /// shutdown fires, so returning early without triggering it only means the node keeps running.
+    /// shutdown fires. Returning without triggering it counts as a background task exiting
+    /// early: the node shuts down and [`Rollup::run`](super::Rollup::run) returns an error.
     async fn run(
         self: Box<Self>,
         requests: mpsc::Receiver<ShutdownRequest>,
@@ -150,7 +151,7 @@ impl<S: Spec, Da: DaService> ShutdownPolicy<S, Da> for DrainThenShutdown {
         ctx: ShutdownContext<S, Da>,
     ) {
         let Some(request) = requests.recv().await else {
-            warn!("Shutdown request channel closed, the node can no longer be stopped by signal");
+            warn!("Shutdown request channel closed before any request");
             return;
         };
         let Some(control) = ctx.sequencer_control.as_deref() else {
