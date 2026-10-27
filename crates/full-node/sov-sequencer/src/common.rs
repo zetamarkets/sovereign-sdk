@@ -401,6 +401,30 @@ pub enum StateUpdateError {
     Shutdown,
 }
 
+/// Errors returned by [`SequencerControl`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum DrainError {
+    /// The sequencer's state task is gone (shut down or crashed), so the request cannot be served.
+    #[error("the sequencer is unavailable")]
+    Unavailable,
+}
+
+/// Lets a shutdown policy drain a sequencer: stop accepting work, then watch the batches it has
+/// already soft-confirmed until they are final on DA and applied locally.
+#[async_trait]
+pub trait SequencerControl: Send + Sync {
+    /// Closes and publishes the open batch (if any) and stops accepting transactions and starting
+    /// batches from the returned height on. Idempotent; a replica leaves its state untouched and
+    /// just reports its current height.
+    async fn begin_drain(&self) -> Result<RollupHeight, DrainError>;
+
+    /// Number of closed batches that are not yet part of this node's finalized state, i.e. not
+    /// both final on DA and applied locally. Counted from the moment a batch is closed (before it
+    /// reaches the blob sender), so zero after [`Self::begin_drain`] means nothing soft-confirmed
+    /// is outstanding.
+    async fn unfinalized_batches(&self) -> Result<usize, DrainError>;
+}
+
 /// Polls for the next state update, handling shutdown, timeout, and debug flags
 pub async fn poll_state_update<S: Spec>(
     state_update_receiver: &mut StateUpdateReceiver<S::Storage>,

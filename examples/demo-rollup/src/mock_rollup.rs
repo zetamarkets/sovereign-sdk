@@ -15,6 +15,7 @@ use sov_modules_api::execution_mode::{Native, WitnessGeneration};
 use sov_modules_api::{NodeEndpoints, Spec};
 use sov_modules_rollup_blueprint::pluggable_traits::PluggableSpec;
 use sov_modules_rollup_blueprint::proof_sender::SovApiProofSender;
+use sov_modules_rollup_blueprint::shutdown::{DrainThenShutdown, ShutdownPolicy};
 use sov_modules_rollup_blueprint::{
     FullNodeBlueprint, RollupBlueprint, SequencerCreationReceipt, WalletBlueprint,
 };
@@ -172,6 +173,10 @@ impl FullNodeBlueprint<Native> for MockDemoRollup<Native> {
 
     fn compute_code_commitments() -> anyhow::Result<(MockCodeCommitment, MockCodeCommitment)> {
         Ok(read_mock_code_commitments_from_env())
+    }
+
+    fn shutdown_policy(&self) -> Box<dyn ShutdownPolicy<Self::Spec, Self::DaService>> {
+        Box::new(DrainThenShutdown::default())
     }
 }
 

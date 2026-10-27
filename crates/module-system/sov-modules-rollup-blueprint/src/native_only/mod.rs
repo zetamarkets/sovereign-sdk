@@ -1,12 +1,17 @@
 mod endpoints;
 pub mod logging;
 pub mod proof_sender;
+pub mod shutdown;
 mod telemetry;
 mod wallet;
 use anyhow::Context;
 use async_trait::async_trait;
 pub use endpoints::*;
 use futures::future;
+use shutdown::{
+    spawn_os_signal_forwarder, spawn_shutdown_policy, ImmediateShutdown, ShutdownContext,
+    ShutdownPolicy, ShutdownRequest,
+};
 use sov_db::ledger_db::LedgerDb;
 use sov_db::schema::{DeltaReader, SchemaBatch};
 use sov_modules_api::capabilities::{
@@ -32,7 +37,9 @@ use sov_rollup_interface::storage::HierarchicalStorageManager;
 use sov_rollup_interface::ProvableHeightTracker;
 use sov_sequencer::preferred::PreferredSequencer;
 use sov_sequencer::standard::StdSequencer;
-use sov_sequencer::{ProofBlobSender, Sequencer, SequencerApis, SequencerKindConfig};
+use sov_sequencer::{
+    ProofBlobSender, Sequencer, SequencerApis, SequencerControl, SequencerKindConfig,
+};
 use sov_shutdown::{BackgroundHandle, PrimaryShutdownController, SecondaryShutdownController};
 use sov_state::storage::NativeStorage;
 use sov_state::Storage;
@@ -48,8 +55,7 @@ use sov_stf_runner::{make_da_sync_state, DaServiceWithCachedFinalizedHeaders};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::signal::unix::SignalKind;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::info;
 pub use wallet::*;
@@ -184,6 +190,13 @@ pub trait FullNodeBlueprint<M: ExecutionMode>: RollupBlueprint<M> {
         sequencer: Arc<dyn ProofBlobSender>,
     ) -> anyhow::Result<Self::ProofSender>;
 
+    /// How the node reacts to shutdown requests (OS signals and
+    /// [`Rollup::shutdown_requester`]). A preferred sequencer that must not leave soft-confirmed
+    /// batches to the next leader should return [`shutdown::DrainThenShutdown`].
+    fn shutdown_policy(&self) -> Box<dyn ShutdownPolicy<Self::Spec, Self::DaService>> {
+        Box::new(ImmediateShutdown)
+    }
+
     /// Computes the inner (state-transition) and outer (aggregation) code commitments
     /// for this rollup's zkVM(s), typically derived from the guest ELF(s).
     fn compute_code_commitments() -> anyhow::Result<(
@@ -301,6 +314,7 @@ pub trait FullNodeBlueprint<M: ExecutionMode>: RollupBlueprint<M> {
                     endpoints,
                     background_handles,
                     proof_sender: Arc::new(sequencer),
+                    sequencer_control: None,
                     api_ledger_db: api_ledger_db.clone(),
                     da_address,
                     sequencer_role: SequencerRole::BatchProducer,
@@ -341,11 +355,13 @@ pub trait FullNodeBlueprint<M: ExecutionMode>: RollupBlueprint<M> {
                     SequencerApis::rest_api_server(sequencer.clone(), primary_shutdown),
                 );
 
+                let sequencer = Arc::new(sequencer);
                 Ok(SequencerCreationReceipt {
                     api_state: sequencer.api_state(),
                     endpoints,
                     background_handles,
-                    proof_sender: Arc::new(sequencer),
+                    sequencer_control: Some(sequencer.clone()),
+                    proof_sender: sequencer,
                     api_ledger_db: api_ledger_db.clone(),
                     da_address,
                     sequencer_role: seq_role,
@@ -667,6 +683,22 @@ pub trait FullNodeBlueprint<M: ExecutionMode>: RollupBlueprint<M> {
             (None, None)
         };
 
+        let shutdown_ctx = ShutdownContext {
+            primary_shutdown: primary_shutdown.clone(),
+            secondary_shutdown: secondary_shutdown_controller.clone(),
+            sequencer_control: sequencer.sequencer_control.clone(),
+            sequencer_role: sequencer.sequencer_role,
+            da_service: da_service.clone(),
+            ledger_db: ledger_db.clone(),
+            api_ledger_db: api_ledger_db.clone(),
+            api_state: sequencer.api_state.clone(),
+            da_sync_state: da_sync_state.clone(),
+            sync_status_receiver: sync_status_receiver.clone(),
+            state_update_receiver: state_update_receiver.clone(),
+            da_address: sequencer.da_address,
+            rollup_config: rollup_config.clone(),
+        };
+
         let runner_result = StateTransitionRunner::new(
             rollup_config.runner.clone(),
             axum_tcp,
@@ -815,7 +847,13 @@ pub trait FullNodeBlueprint<M: ExecutionMode>: RollupBlueprint<M> {
 
         background_handles.extend(sequencer.background_handles);
 
-        spawn_os_signal_handler(primary_shutdown.clone());
+        let (shutdown_requester, shutdown_requests) = mpsc::channel(8);
+        spawn_os_signal_forwarder(primary_shutdown.clone(), shutdown_requester.clone());
+        background_handles.push(spawn_shutdown_policy(
+            self.shutdown_policy(),
+            shutdown_requests,
+            shutdown_ctx,
+        ));
 
         Ok(Rollup {
             runner,
@@ -825,6 +863,7 @@ pub trait FullNodeBlueprint<M: ExecutionMode>: RollupBlueprint<M> {
             background_handles,
             genesis_slot_number: genesis_da_height,
             rpc_aggregation_config: monitoring_config.rpc_aggregation.clone(),
+            shutdown_requester,
         })
     }
 }
@@ -982,9 +1021,16 @@ pub struct Rollup<S: FullNodeBlueprint<M>, M: ExecutionMode> {
     /// `rollup_config.monitoring` at creation time and handed to the HTTP
     /// server in [`Rollup::run`].
     rpc_aggregation_config: sov_metrics::RpcAggregationConfig,
+
+    shutdown_requester: mpsc::Sender<ShutdownRequest>,
 }
 
 impl<S: FullNodeBlueprint<M>, M: ExecutionMode> Rollup<S, M> {
+    /// A handle that feeds the [`ShutdownPolicy`] the same way an OS signal does.
+    pub fn shutdown_requester(&self) -> mpsc::Sender<ShutdownRequest> {
+        self.shutdown_requester.clone()
+    }
+
     /// Runs the rollup.
     pub async fn run(self) -> anyhow::Result<()> {
         let Self {
@@ -995,6 +1041,7 @@ impl<S: FullNodeBlueprint<M>, M: ExecutionMode> Rollup<S, M> {
             secondary_shutdown_controller,
             background_handles,
             rpc_aggregation_config,
+            shutdown_requester: _,
         } = self;
         let NodeEndpointsContainer {
             inner,
@@ -1096,26 +1143,6 @@ fn spawn_task_monitor(
     })
 }
 
-fn spawn_os_signal_handler(primary_shutdown: PrimaryShutdownController) {
-    BackgroundHandle::spawn("os-signal-handler", async move {
-        let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())
-            .expect("Failed to set up SIGTERM handler");
-        let mut quit = tokio::signal::unix::signal(SignalKind::quit())
-            .expect("Failed to set up SIGQUIT handler");
-
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => tracing::info!("Received Ctrl+C"),
-            _ = terminate.recv() => tracing::info!("Received SIGTERM"),
-            _ = quit.recv() => tracing::info!("Received SIGQUIT"),
-            _ = primary_shutdown.wait_for_shutdown() => {
-                tracing::debug!("Stopping OS signal handling task, as rollup has been stopped programmatically");
-                return;
-            }
-        }
-        primary_shutdown.shutdown();
-    });
-}
-
 /// The result of [`FullNodeBlueprint::create_sequencer`].
 pub struct SequencerCreationReceipt<S: Spec> {
     /// The [`ApiState`] that shall be used by REST APIs.
@@ -1126,6 +1153,8 @@ pub struct SequencerCreationReceipt<S: Spec> {
     ///
     /// See [`crate::proof_sender::SovApiProofSender::new`].
     pub proof_sender: Arc<dyn ProofBlobSender>,
+    /// Lets a [`ShutdownPolicy`] drain the sequencer; `None` when it cannot be drained.
+    pub sequencer_control: Option<Arc<dyn SequencerControl>>,
     /// The API LedgerDb that the sequencer will update for REST API consistency
     pub api_ledger_db: LedgerDb,
     #[allow(missing_docs)]

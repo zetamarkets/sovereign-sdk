@@ -244,7 +244,6 @@ where
             nonce_buffer_input,
             primary_shutdown: primary_shutdown.clone(),
             tx_queue_id,
-            stop_at_rollup_height,
             test_only_state_update_notification_receiver,
             #[cfg(feature = "test-utils")]
             test_only_state_update_notification_sender,
