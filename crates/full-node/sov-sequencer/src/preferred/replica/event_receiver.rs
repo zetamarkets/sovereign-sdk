@@ -13,7 +13,7 @@ use sqlx::postgres::{PgListener, PgPoolOptions};
 use sqlx::PgPool;
 use sqlx::Row;
 use tokio::sync::watch;
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 const MAX_DB_ERRORS_ALLOWED: u32 = 20;
 
@@ -211,9 +211,18 @@ impl EventReceiver {
                                 panic!("Invalid event sequence in the db: {prev_event_type:?} {event_type:?}. Replica shutting down.");
                             }
                             EventReceiverError::DbRowDoesNotExist(event_id) => {
-                                panic!(
-                                    "Db row does not exist for event id: {event_id:?} {start_event_id:?} {prev_event_type:?}. Replica shutting down."
+                                // The leader prunes events a fixed number of batches behind the
+                                // DA tip, so a notification read after a long stall can name a
+                                // row that is already gone. Resume from the next batch start;
+                                // the sequencer state catches up through the node meanwhile.
+                                warn!(
+                                    event_id,
+                                    ?start_event_id,
+                                    ?prev_event_type,
+                                    "Db row does not exist; its batch was pruned. Resuming from the next batch start."
                                 );
+                                start_event_id = None;
+                                prev_event_type = None;
                             }
                         }
                     }
@@ -258,8 +267,8 @@ impl EventReceiver {
                 assert!(notify.event_id >= start_id);
                 (start_id, notify.event_id)
             }
-            // Otherwise, `None` indicates the replica has just started.
-            // Keep listening for events until a `BatchStart` notification is received,
+            // Otherwise, `None` indicates the replica has just started or lost its place
+            // to pruning. Keep listening for events until a `BatchStart` notification is received,
             // then use that event's ID as both the starting and target event ID.
             None => loop {
                 let notify = listener.recv().await?;
