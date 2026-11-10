@@ -564,7 +564,7 @@ where
     }
 
     pub(crate) fn is_replica_role(&self) -> bool {
-        self.seq_role == SequencerRole::PgSyncReplica
+        self.seq_role.is_replica()
     }
 
     /// Create a new batch, if possible. Errors here are expected, because it's not always possible to create a new batch due to transient DA issues.
