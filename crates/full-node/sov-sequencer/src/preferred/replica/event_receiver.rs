@@ -53,23 +53,23 @@ impl EventReceiverStartNotifier {
     }
 
     /// Notifies the replica sync task that it’s time to start processing leader sequencer DB events.
-    /// This method only has an effect when called on a replica sequencer, since the leader produces
-    /// the DB events rather than consuming them.
+    /// This method only has an effect on a Postgres-synced replica: the leader produces the DB
+    /// events rather than consuming them, and a DA-only replica never reads them.
     pub(crate) fn notify(&self) {
-        if self.seq_role == SequencerRole::BatchProducer {
+        if self.seq_role != SequencerRole::PgSyncReplica {
             return;
         }
 
         let _ = self.notify.send(());
     }
 
-    /// If the sequencer is in replica mode, we check whether the replica sync task has processed
-    /// its first batch, which indicates that all services are up and running.
-    /// For the leader, this method always returns Ok(()).
+    /// If the sequencer is a Postgres-synced replica, we check whether the replica sync task has
+    /// processed its first batch, which indicates that all services are up and running.
+    /// For the leader and a DA-only replica, this method always returns Ok(()).
     pub(crate) fn check_replica_status_or_ok_for_leader(
         &self,
     ) -> Result<(), SequencerNotReadyDetails> {
-        if self.seq_role == SequencerRole::BatchProducer {
+        if self.seq_role != SequencerRole::PgSyncReplica {
             return Ok(());
         }
 
@@ -335,5 +335,26 @@ impl EventReceiver {
         }
 
         Ok(prev_event_type)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_pg_synced_replica_waits_for_its_first_batch() {
+        for (role, ready_before_first_batch) in [
+            (SequencerRole::BatchProducer, true),
+            (SequencerRole::DaOnlyReplica, true),
+            (SequencerRole::PgSyncReplica, false),
+        ] {
+            let (notifier, _receiver) = EventReceiverStartNotifier::new(role);
+            assert_eq!(
+                notifier.check_replica_status_or_ok_for_leader().is_ok(),
+                ready_before_first_batch,
+                "{role:?}"
+            );
+        }
     }
 }
