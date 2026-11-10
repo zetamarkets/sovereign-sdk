@@ -230,6 +230,10 @@ mod tests {
         fn seq_nr(&self) -> u64 {
             self.exec_seq_nr.load(Ordering::SeqCst)
         }
+
+        fn set_seq_nr(&self, seq_nr: u64) {
+            self.exec_seq_nr.store(seq_nr, Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
@@ -456,6 +460,89 @@ mod tests {
             let recv_data = recv.recv().await.unwrap();
             assert_eq!(recv_data, data, "Expected: {data:?}, got: {recv_data:?}");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_notifications_resume_after_target_row_pruned() {
+        let postgres = create_postgres_container().await;
+        let postgres = match postgres {
+            Ok(pg) => pg,
+            Err(CreatePostgresError::DockerNotSupported) => return,
+            Err(CreatePostgresError::DockerError(e)) => {
+                panic!("Failed to create Postgres container: {e}");
+            }
+        };
+
+        let postgres_config = config_from_postgres_container(
+            &postgres,
+            "Replica".into(),
+            ConfiguredNodeRole::Replica,
+        )
+        .await
+        .unwrap();
+
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        let mut db = PostgresBackend::connect(&postgres_config, addr)
+            .await
+            .unwrap();
+
+        let _ = db
+            .heartbeat(Some(postgres_config.leader_election))
+            .await
+            .unwrap();
+
+        let primary_shutdown = PrimaryShutdownController::new();
+        let (mut sync_task, start_replica_task_notifier) =
+            ReplicaSyncTask::new_with_page_size(primary_shutdown, 2, SequencerRole::PgSyncReplica)
+                .await
+                .unwrap();
+
+        start_replica_task_notifier.notify();
+
+        let (test_handler, mut recv) = TestHandler::new(0);
+        sync_task
+            .start(test_handler.clone(), &postgres_config)
+            .await;
+
+        // Wait for sync_task.start to spawn the sync task
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let first_batch = vec![TestCase::CompleteBatch(1, 1)];
+        let first_expected = to_db_data(&first_batch);
+        execute(&mut db, first_batch).await;
+
+        for data in first_expected {
+            let recv_data = recv.recv().await.unwrap();
+            assert_eq!(recv_data, data, "Expected: {data:?}, got: {recv_data:?}");
+        }
+
+        // Batch 5 is too far ahead for the handler, which keeps rejecting its batch start, so
+        // the receiver fills the channel and blocks with the rest of batch 5 unread.
+        execute(&mut db, vec![TestCase::CompleteBatch(5, 3)]).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Meanwhile the leader prunes batch 5 (`prune` deletes up to `up_to_including + 1`)
+        // and produces batch 6.
+        db.prune(4).await.unwrap();
+        let third_batch = vec![TestCase::CompleteBatch(6, 1)];
+        let third_expected = to_db_data(&third_batch);
+        execute(&mut db, third_batch).await;
+
+        // Once the handler accepts batch 5, the receiver resumes on a notification whose row
+        // is gone. It must skip to batch 6 instead of shutting the replica down.
+        test_handler.set_seq_nr(5);
+        let mut received = Vec::new();
+        while received.len() < third_expected.len() {
+            let data = tokio::time::timeout(Duration::from_secs(30), recv.recv())
+                .await
+                .expect("receiver did not recover from the pruned row")
+                .unwrap();
+            if data.sequence_number() == 5 && received.is_empty() {
+                continue;
+            }
+            received.push(data);
+        }
+        assert_eq!(received, third_expected);
     }
 
     async fn run(test_cases: Vec<TestCase>, expected: Vec<DbData>, exec_seq_nr: u64) {
